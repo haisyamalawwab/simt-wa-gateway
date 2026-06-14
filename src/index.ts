@@ -8,7 +8,8 @@ import makeWASocket, {
   DisconnectReason,
   useMultiFileAuthState,
   WASocket,
-  ConnectionState
+  ConnectionState,
+  fetchLatestBaileysVersion
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import axios from 'axios';
@@ -54,8 +55,8 @@ const authMiddleware = (req: Request, res: Response, next: any) => {
 };
 
 // Start a WhatsApp session for a specific tenant
-async function startSession(tenantId: string): Promise<Session> {
-  if (sessions.has(tenantId)) {
+async function startSession(tenantId: string, force = false): Promise<Session> {
+  if (sessions.has(tenantId) && !force) {
     const existing = sessions.get(tenantId)!;
     if (existing.status === 'CONNECTED' || existing.status === 'CONNECTING') {
       return existing;
@@ -67,8 +68,17 @@ async function startSession(tenantId: string): Promise<Session> {
     fs.mkdirSync(sessionDir, { recursive: true });
   }
 
+  let version;
+  try {
+    const fetched = await fetchLatestBaileysVersion();
+    version = fetched.version;
+  } catch (err) {
+    logger.error({ err }, `Failed to fetch latest Baileys version for ${tenantId}`);
+  }
+
   const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
   const socket = makeWASocket({
+    version,
     auth: state,
     logger: pino({ level: 'silent' }),
     printQRInTerminal: false,
@@ -130,7 +140,13 @@ async function startSession(tenantId: string): Promise<Session> {
       } else {
         // Reconnect
         sessionObj.status = 'CONNECTING';
-        startSession(tenantId);
+        sessionObj.socket = undefined;
+        setTimeout(() => {
+          logger.info(`Session ${tenantId}: Reconnecting...`);
+          startSession(tenantId, true).catch(err => {
+            logger.error({ err }, `Error during reconnection for ${tenantId}`);
+          });
+        }, 5000);
       }
     }
   });

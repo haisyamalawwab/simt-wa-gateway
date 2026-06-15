@@ -1,7 +1,6 @@
 import makeWASocket, {
   DisconnectReason,
   useMultiFileAuthState,
-  WASocket,
   ConnectionState,
   fetchLatestBaileysVersion
 } from '@whiskeysockets/baileys';
@@ -9,6 +8,7 @@ import { Boom } from '@hapi/boom';
 import path from 'path';
 import fs from 'fs';
 import pino from 'pino';
+import QRCode from 'qrcode';
 import { Session } from '../types';
 import { logger } from '../utils/logger';
 import { triggerWebhook } from '../utils/webhook';
@@ -23,12 +23,12 @@ export async function startSession(tenantId: string, force = false): Promise<Ses
     }
   }
 
-  const sessionDir = path.join(__dirname, '..', '..', 'sessions', tenantId);
+  const sessionDir = path.join(process.cwd(), 'sessions', tenantId);
   if (!fs.existsSync(sessionDir)) {
     fs.mkdirSync(sessionDir, { recursive: true });
   }
 
-  let version;
+  let version: [number, number, number] | undefined;
   try {
     const fetched = await fetchLatestBaileysVersion();
     version = fetched.version;
@@ -56,12 +56,11 @@ export async function startSession(tenantId: string, force = false): Promise<Ses
 
     if (qr) {
       sessionObj.status = 'QR_READY';
-      const QRCode = require('qrcode');
-      QRCode.toDataURL(qr, (err: any, url: string) => {
-        if (!err) {
-          sessionObj.qr = url;
-        }
-      });
+      try {
+        sessionObj.qr = await QRCode.toDataURL(qr);
+      } catch (err) {
+        logger.error({ err }, `Failed to generate QR code for ${tenantId}`);
+      }
       logger.info(`Session ${tenantId}: QR Code generated.`);
     }
 
@@ -72,7 +71,6 @@ export async function startSession(tenantId: string, force = false): Promise<Ses
       sessionObj.number = userJid ? userJid.split(':')[0] : undefined;
       logger.info(`Session ${tenantId}: Connected successfully as ${sessionObj.number}`);
 
-      // Webhook notification back to Laravel
       triggerWebhook(tenantId, {
         event: 'session_connected',
         status: 'CONNECTED',
@@ -82,10 +80,9 @@ export async function startSession(tenantId: string, force = false): Promise<Ses
 
     if (connection === 'close') {
       const shouldReconnect = (lastDisconnect?.error as Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
-      (logger as any).warn(`Session ${tenantId}: Connection closed. Reason: ${String(lastDisconnect?.error)}. Reconnecting: ${shouldReconnect}`);
+      logger.warn(`Session ${tenantId}: Connection closed. Reason: ${String(lastDisconnect?.error)}. Reconnecting: ${shouldReconnect}`);
 
       if (!shouldReconnect) {
-        // Logged out
         sessionObj.status = 'DISCONNECTED';
         sessionObj.qr = undefined;
         sessionObj.number = undefined;
@@ -98,7 +95,6 @@ export async function startSession(tenantId: string, force = false): Promise<Ses
         }
         triggerWebhook(tenantId, { event: 'session_disconnected', status: 'DISCONNECTED' });
       } else {
-        // Reconnect
         sessionObj.status = 'CONNECTING';
         sessionObj.socket = undefined;
         setTimeout(() => {
@@ -119,13 +115,13 @@ export async function startSession(tenantId: string, force = false): Promise<Ses
         if (!msg.key.fromMe && msg.message) {
           const from = msg.key.remoteJid;
           if (from) {
-            const text = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
+            const text = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
             if (text) {
               logger.info(`Session ${tenantId}: Incoming message from ${from}: ${text}`);
               triggerWebhook(tenantId, {
                 event: 'message_received',
                 from: from.split('@')[0],
-                senderName: msg.pushName || "",
+                senderName: msg.pushName || '',
                 message: text,
                 messageId: msg.key.id
               }).catch(err => {
@@ -141,13 +137,31 @@ export async function startSession(tenantId: string, force = false): Promise<Ses
   return sessionObj;
 }
 
+export async function stopSession(tenantId: string): Promise<void> {
+  const session = sessions.get(tenantId);
+  if (!session) return;
+
+  const sessionDir = path.join(process.cwd(), 'sessions', tenantId);
+
+  if (session.socket) {
+    await session.socket.logout();
+  } else {
+    sessions.delete(tenantId);
+    try {
+      fs.rmSync(sessionDir, { recursive: true, force: true });
+    } catch (e) {
+      logger.error({ err: e }, `Failed to delete session dir for ${tenantId}`);
+    }
+  }
+}
+
 export async function sendMessage(tenantId: string, to: string, text: string, referenceId?: string): Promise<any> {
   const session = sessions.get(tenantId);
   if (!session || session.status !== 'CONNECTED' || !session.socket) {
     throw new Error('WhatsApp session is not connected for this tenant');
   }
 
-  // Normalize phone number (ensure @s.whatsapp.net format)
+  // Normalize phone number to international format with @s.whatsapp.net suffix
   let formattedTo = to.replace(/[^0-9]/g, '');
   if (formattedTo.startsWith('08')) {
     formattedTo = '628' + formattedTo.slice(2);
@@ -158,7 +172,7 @@ export async function sendMessage(tenantId: string, to: string, text: string, re
 
   const sentMessage = await session.socket.sendMessage(formattedTo, { text });
 
-  // Asynchronously trigger status delivered webhook to Laravel to close the loop
+  // Asynchronously trigger delivery webhook to close the loop on Laravel side
   if (referenceId) {
     setTimeout(() => {
       triggerWebhook(tenantId, {
@@ -174,7 +188,7 @@ export async function sendMessage(tenantId: string, to: string, text: string, re
 }
 
 export function restoreSessions() {
-  const sessionsPath = path.join(__dirname, '..', '..', 'sessions');
+  const sessionsPath = path.join(process.cwd(), 'sessions');
   if (fs.existsSync(sessionsPath)) {
     const folders = fs.readdirSync(sessionsPath);
     for (const folder of folders) {

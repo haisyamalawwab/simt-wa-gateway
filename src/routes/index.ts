@@ -1,10 +1,9 @@
 import { Router } from 'express';
-import path from 'path';
-import fs from 'fs';
 import { authMiddleware } from '../middlewares/auth';
 import {
   sessions,
   startSession,
+  stopSession,
   sendMessage
 } from '../services/whatsapp';
 
@@ -52,7 +51,7 @@ router.get('/api/tenant/:id/session/qr', authMiddleware, (req, res) => {
   res.json({
     success: true,
     status: session.status,
-    qr: session.qr
+    qr: session.qr ?? null
   });
 });
 
@@ -61,12 +60,12 @@ router.get('/api/tenant/:id/session/status', authMiddleware, (req, res) => {
   const tenantId = req.params.id;
   const session = sessions.get(tenantId);
   if (!session) {
-    return res.json({ success: true, status: 'DISCONNECTED' });
+    return res.json({ success: true, status: 'DISCONNECTED', number: null });
   }
   res.json({
     success: true,
     status: session.status,
-    number: session.number
+    number: session.number ?? null
   });
 });
 
@@ -79,20 +78,14 @@ router.post('/api/tenant/:id/session/stop', authMiddleware, async (req, res) => 
   }
 
   try {
-    if (session.socket) {
-      await session.socket.logout();
-    } else {
-      sessions.delete(tenantId);
-      const sessionDir = path.join(__dirname, '..', '..', 'sessions', tenantId);
-      fs.rmSync(sessionDir, { recursive: true, force: true });
-    }
+    await stopSession(tenantId);
     res.json({ success: true, status: 'DISCONNECTED' });
   } catch (err: any) {
     res.status(500).json({ success: false, message: err.message });
   }
 });
 
-// 7. Send single message (Unified endpoint)
+// 7. Send message via tenant endpoint
 router.post('/api/tenant/:id/send', authMiddleware, async (req, res) => {
   const tenantId = req.params.id;
   const { to, text, referenceId } = req.body;
@@ -109,7 +102,7 @@ router.post('/api/tenant/:id/send', authMiddleware, async (req, res) => {
   }
 });
 
-// Alias POST /send for direct integration with app/Jobs/SendWaNotification.php
+// 8. Alias POST /send — direct integration with app/Jobs/SendWaNotification.php
 router.post('/send', authMiddleware, async (req, res) => {
   const { tenantId, to, message, referenceId } = req.body;
 
@@ -118,8 +111,8 @@ router.post('/send', authMiddleware, async (req, res) => {
   }
 
   try {
-    // Start session if not already running (recovability feature)
     const tId = tenantId.toString();
+    // Auto-start session if disconnected (recoverability feature)
     if (!sessions.has(tId) || sessions.get(tId)!.status === 'DISCONNECTED') {
       await startSession(tId);
     }

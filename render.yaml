@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: simt-wa-gateway
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    envVars:
+      - key: PORT
+        value: 8081
+      - key: NODE_ENV
+        value: production
+      - key: WA_GATEWAY_API_KEY
+        sync: false
+      - key: LARAVEL_WEBHOOK_URL
+        sync: false
+      - key: WA_CALLBACK_SECRET
+        sync: false
+    disk:
+      name: sessions
+      mountPath: /app/sessions
+      sizeGB: 1
+    healthCheckPath: /api/health
